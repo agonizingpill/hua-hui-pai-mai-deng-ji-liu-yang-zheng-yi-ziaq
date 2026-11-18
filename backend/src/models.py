@@ -16,7 +16,7 @@ class Consignment(Base):
     __table_args__=(CheckConstraint('crates>0 AND stems_per_crate>0'),)
 class VaseSample(Base):
     __tablename__='vase_samples'
-    id=Column(Integer,primary_key=True);consignment_id=Column(Integer,ForeignKey('consignments.id'),nullable=False);code=Column(String(60),unique=True,nullable=False);maturity=Column(Float,nullable=False);stem_cm=Column(Float,nullable=False);cold_hours=Column(Float,nullable=False);observed_days=Column(Float,nullable=True);state=Column(String(20),default=SAMPLE_STATES[0]);prediction=Column(JSON);error=Column(String(450));approved_grade=Column(String(2));review_note=Column(String(250))
+    id=Column(Integer,primary_key=True);consignment_id=Column(Integer,ForeignKey('consignments.id'),nullable=False);code=Column(String(60),unique=True,nullable=False);maturity=Column(Float,nullable=False);stem_cm=Column(Float,nullable=False);cold_hours=Column(Float,nullable=False);observed_days=Column(Float,nullable=True);state=Column(String(20),default=SAMPLE_STATES[0]);prediction=Column(JSON);error=Column(String(450));approved_grade=Column(String(2));review_note=Column(String(250));model_version=Column(String(20))
 class AuctionSession(Base):
     __tablename__='auction_sessions'
     id=Column(Integer,primary_key=True);code=Column(String(60),unique=True,nullable=False);opens_at=Column(String(20),nullable=False);closes_at=Column(String(20),nullable=False)
@@ -37,3 +37,9 @@ class Settlement(Base):
     __tablename__='settlements'
     id=Column(Integer,primary_key=True);deal_id=Column(Integer,ForeignKey('deals.id'),nullable=False);revision=Column(Integer,nullable=False);kind=Column(String(20),nullable=False);gross_cents=Column(Integer,nullable=False);commission_cents=Column(Integer,nullable=False);target_cents=Column(Integer,nullable=False);delta_cents=Column(Integer,nullable=False);state=Column(String(20),default='draft');snapshot=Column(JSON);receipt=Column(String(80))
     __table_args__=(UniqueConstraint('deal_id','revision'),)
+class ModelVersion(Base):
+    __tablename__='model_versions'
+    id=Column(Integer,primary_key=True);code=Column(String(20),unique=True,nullable=False);label=Column(String(100),nullable=False);state=Column(String(20),nullable=False);holdout_mae_days=Column(Float);trained_rows=Column(Integer);training_snapshot=Column(JSON);holdout_consignment_ids=Column(JSON);last_evaluated_at=Column(String(20));note=Column(String(250),default='')
+class ModelEvaluation(Base):
+    __tablename__='model_evaluations'
+    id=Column(Integer,primary_key=True);at=Column(String(20),nullable=False);old_version=Column(String(20),nullable=False);new_version=Column(String(20),nullable=False);old_mae_days=Column(Float,nullable=False);new_mae_days=Column(Float,nullable=False);switched=Column(Boolean,nullable=False);reason=Column(String(250),nullable=False);holdout_consignment_ids=Column(JSON);holdout_sample_ids=Column(JSON);actor=Column(String(100))

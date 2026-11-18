@@ -26,7 +26,11 @@ JWT8小时，PBKDF2盐化口令；Trace中间件请求ID、Burst每IP每分钟36
 ## 六个业务模块
 
 1. **采切批次与到场分筐**：Consignment唯一code，种植户/品种/采切与到场时间/筐数/每筐支数。到场必须在采切后48小时内且不晚于业务时钟。数量建立后不可任意改写，主管只能修筐贴备注。挂场和成交合计占筐不得超实收。
-2. **瓶插留样与寿命估级**：VaseSample关联到场单，唯一留样签，成熟度、杆长、冷藏小时不得超过采后小时。recorded→queued→running→ready或failed，worker真实估级后主管核定A/B/C，保留模型建议与人工核级。实际瓶插终点只能封存一次；争议使用冻结快照，不覆盖旧证据。
+2. **瓶插留样与寿命估级（双版本换版）**：VaseSample关联到场单，唯一留样签，成熟度、杆长、冷藏小时不得超过采后小时。recorded→queued→running→ready或failed，worker真实估级后主管核定A/B/C，保留模型建议与人工核级。实际瓶插终点只能封存一次；争议使用冻结快照，不覆盖旧证据。估级分两版：`v1-synthetic`旧版（固定合成数据训练，初始生效）与`v2-sealed`新版（仅用已封存实际瓶插终点训练的候选版）。
+   - **按到场批固定留出**：封存留样最多的到场批整批选为固定留出（并列取到场单id最小者），该批留样两版都不用于训练；首次评估选定后跨评估沿用同一到场批。
+   - **换版规则**：主管在留样页发起换版，两版在同一组固定留出留样上比平均绝对误差（MAE），新版MAE不劣于（`<=`）旧版才把新版置为active、旧版archived；否则沿用旧版，每次评估（含失败与理由）落`model_evaluations`，已切换后拒绝重复换版，未切换可重评。封存/训练留样各不足2条时拒绝评估。
+   - **版本固定与不重复**：留样送估（estimate）时即把当时active版本写入`vase_samples.model_version`；worker按该列取模型，中断重试不改换版本，且非queued态任务直接跳过，不重复出结果。历史留样即使换版后仍保留其原估级版本与依据，已核定等级不受影响。
+   - 留样页可发起换版、查看两版固定留出MAE、实际生效版本与历次评估记录；观察席只读，换版仅主管。
 3. **拍卖场次和底价**：AuctionSession设开场/截止，AuctionLot关联本批已核级留样和场次。A最低80元/筐、B55元、C30元。挂场先锁Consignment父行，再计算所有未撤场标的占筐。未评级、低底价、超余筐或已截止拒绝。未出价未成交标的可主管撤场释放额度，有出价不得撤场。
 4. **竞价与成交锁筐**：Bid须在`opens_at ≤ clock < closes_at`时提交，达到底价并严格高于当前最高价。同父行→场次→业务时钟→标的锁序，避免并发报价检查窗口。主管只能在截止后一次截标，最高价Bid生成唯一Deal；无报价不成交，需撤场。成交冻结买方、单价、筐数与原等级，不能再次出售。
 5. **留样争议和复判**：Deal必须已有实际留样天数才可开Dispute，每成交只允许一条未决争议。主管复判不得上调现有效等级，也不得高于冻结终点对应级别（≥10天A、≥7天B、否则C）。复判只追加修订，推进Deal.revision，旧draft结算作废；已付记录保留。
@@ -36,9 +40,11 @@ JWT8小时，PBKDF2盐化口令；Trace中间件请求ID、Burst每IP每分钟36
 
 ## 真实算法与队列
 
-`backend/src/grading.py`固定NumPy seed35生成200条合成花卉观测：成熟度0.1–1、杆长35–90cm、采后1–40h、冷藏0–25h；目标`clip(14−6×成熟度+.04×(杆长−50)−.13×采后小时+.09×冷藏小时+N(0,.35),2,20)`。先固定拆分150训练/50留出，GradientBoostingRegressor（80树、深度2、seed35）仅拟合训练集，输出留出MAE天数、预测瓶插天数与A/B/C建议。保留源数据SHA256、训练/留出索引与输入快照；不是实际客户农业样本，模型不替代验级员判断。
+`backend/src/grading.py`固定NumPy seed35生成200条合成花卉观测：成熟度0.1–1、杆长35–90cm、采后1–40h、冷藏0–25h；目标`clip(14−6×成熟度+.04×(杆长−50)−.13×采后小时+.09×冷藏小时+N(0,.35),2,20)`。先固定拆分150训练/50留出，GradientBoostingRegressor（80树、深度2、seed35）仅拟合训练集，输出留出MAE天数、预测瓶插天数与A/B/C建议。保留源数据SHA256、训练/留出索引与输入快照；不是实际客户农业样本，模型不替代验级员判断。该管线即旧版`v1-synthetic`，其合成留出MAE与重构前完全一致。
 
-接口将留样ID送Redis，worker计算真实sklearn结果，DB prediction与`/artifacts/grade-ID.json`共享卷落盘。故障记录failed/error，Redis恢复后可同记录重试。未实现worker硬崩溃后的running自动回收，不能声称可靠消息投递。
+新版`v2-sealed`复用同款GradientBoostingRegressor（80树、深度2、seed35），训练数据改为数据库中**已封存实际瓶插终点**的留样（特征为成熟度、杆长、采后小时、冷藏小时，标签为observed_days），按到场批固定留出排除整批后拟合其余批次；在固定留出批上与旧版同口径计算MAE决定是否换版。训练行、留样/批次id与SHA256快照存`model_versions.training_snapshot`，评估结果存`model_evaluations`。模型注册表懒初始化（首次访问`/models`或送估/worker处理时补齐v1/v2两行），`db.ensure_schema()`幂等建新表并给旧库`vase_samples`补`model_version`列。
+
+接口将留样ID送Redis，worker计算真实sklearn结果，DB prediction与`/artifacts/grade-ID.json`共享卷落盘。worker按留样固定的`model_version`取模型并回写实际用版；故障记录failed/error，Redis恢复后可同记录重试，非queued态消息跳过，不重复出结果。未实现worker硬崩溃后的running自动回收，不能声称可靠消息投递。
 
 ## 一天的工作剧本
 

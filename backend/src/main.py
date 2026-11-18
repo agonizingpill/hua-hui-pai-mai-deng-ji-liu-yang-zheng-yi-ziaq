@@ -11,10 +11,12 @@ from .schemas import *
 from .common import lock,pack,add,audit,stamp
 from .auth import current,writer,supervisor,verify,token
 from .middleware import Trace,Burst
-from . import auction_service as auction,dispute_service as dispute
+from . import auction_service as auction,dispute_service as dispute,model_service
 q=redis.Redis.from_url(os.environ['REDIS_URL'],decode_responses=True)
 @asynccontextmanager
 async def lifespan(app):
+    from .db import ensure_schema
+    ensure_schema()
     if os.getenv('SEED_DEMO','true').lower()=='true':
         try:
             from .seed_service import seed
@@ -35,7 +37,7 @@ def login(d:Login,s=Depends(session)):
 def me(u=Depends(current)):return {'email':u.email,'role':u.role}
 @app.get('/archive')
 def archive(s=Depends(session),u=Depends(current)):
-    return {m.__tablename__:[pack(x)for x in s.scalars(select(m).order_by(m.id))]for m in (Clock,Consignment,VaseSample,AuctionSession,AuctionLot,Bid,Deal,Dispute,Settlement)}
+    return {m.__tablename__:[pack(x)for x in s.scalars(select(m).order_by(m.id))]for m in (Clock,Consignment,VaseSample,AuctionSession,AuctionLot,Bid,Deal,Dispute,Settlement,ModelVersion,ModelEvaluation)}
 @app.get('/audits')
 def audits(s=Depends(session),u=Depends(current)):return [pack(x)for x in s.scalars(select(Audit).order_by(Audit.id.desc()).limit(50))]
 @app.post('/consignments')
@@ -56,10 +58,20 @@ def sample(d:SampleInput,s=Depends(session),u=Depends(writer)):
 def estimate(id:int,s=Depends(session),u=Depends(writer)):
     x=lock(s,VaseSample,id)
     if x.state not in ('recorded','failed'):raise HTTPException(409,'仅新留样或失败评估可估级')
+    # 留样送估即固定当时有效版本；中断/失败重试沿用同一版本，不因后续换版而改变
+    model_service.ensure_registry(s)
+    if x.model_version is None:x.model_version=model_service.active_version(s).code
     x.state='queued';x.error=None;s.commit()
     try:q.rpush('floral-grade',id)
     except Exception:x.state='failed';x.error='队列不可用，恢复后可重试';s.commit();raise HTTPException(503,x.error)
     return pack(x)
+@app.get('/models')
+def models(s=Depends(session),u=Depends(current)):
+    return model_service.comparison(s)
+@app.post('/models/switch')
+def model_switch(s=Depends(session),u=Depends(supervisor)):
+    switched,reason=model_service.switch(s,u);s.commit()
+    return {'switched':switched,'reason':reason,**model_service.comparison(s)}
 @app.post('/samples/{id}/approve')
 def grade(id:int,d:GradeInput,s=Depends(session),u=Depends(supervisor)):
     x=lock(s,VaseSample,id)
